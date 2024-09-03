@@ -1,0 +1,55 @@
+name: Terraform Deployment
+
+on:
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.9.5
+
+    
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: eu-west-1
+
+
+    - name: Terraform Init
+      run: terraform init
+
+    - name: Terraform Plan
+      id: plan
+      run: terraform plan -out=tfplan
+
+    - name: Create Pull Request
+      if: github.event_name == 'push'
+      run: |
+        gh pr create --title "Deploy Terraform changes" --body "Automated PR to deploy Terraform changes" --base main --head terraform-branch
+
+    - name: Wait for PR Approval
+      if: github.event_name == 'pull_request'
+      run: |
+        echo "Waiting for PR to be approved..."
+        sleep 30  # Adjust as needed for approval time
+
+    - name: Merge Pull Request
+      if: github.event_name == 'pull_request'
+      run: |
+        gh pr merge --merge ${{ github.event.pull_request.number }}
+
+    - name: Terraform Apply
+      if: github.event_name == 'pull_request' && github.event.pull_request.mergeable_state == 'clean'
+      run: terraform apply -auto-approve
