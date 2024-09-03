@@ -1,55 +1,111 @@
-name: Terraform Deployment
+name: Terraform Workflow
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
-      - master
+      - main
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.9.5
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.9.5
 
-    
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: eu-west-1
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-2
 
+      - name: Terraform Init
+        run: terraform init
 
-    - name: Terraform Init
-      run: terraform init
+      - name: Terraform Plan
+        id: terraform_plan
+        run: terraform plan -out=terraform.tfplan
 
-    - name: Terraform Plan
-      id: plan
-      run: terraform plan -out=tfplan
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-plan
+          path: terraform.tfplan
 
-    - name: Create Pull Request
-      if: github.event_name == 'push'
-      run: |
-        gh pr create --title "Deploy Terraform changes" --body "Automated PR to deploy Terraform changes" --base main --head terraform-branch
+      - name: Create Pull Request for Terraform Plan
+        id: create_pr
+        uses: peter-evans/create-pull-request@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "Terraform Plan Output"
+          body: "This PR includes the Terraform plan output. Please review the changes."
+          base: main
+          branch: terraform-plan-branch
+          files: |
+            terraform.tfplan
 
-    - name: Wait for PR Approval
-      if: github.event_name == 'pull_request'
-      run: |
-        echo "Waiting for PR to be approved..."
-        sleep 30  # Adjust as needed for approval time
+  review:
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: github.event_name == 'pull_request' && github.event.action == 'opened'
+    steps:
+      - name: Wait for PR Approval
+        id: approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_TOKEN }}
+          approvers: ${{ secrets.APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Approval needed for Terraform deployment"
+          issue-body: "Please approve or deny the Terraform deployment."
 
-    - name: Merge Pull Request
-      if: github.event_name == 'pull_request'
-      run: |
-        gh pr merge --merge ${{ github.event.pull_request.number }}
+  apply:
+    runs-on: ubuntu-latest
+    needs: review
+    if: github.event_name == 'pull_request' && github.event.action == 'approved'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Terraform Apply
-      if: github.event_name == 'pull_request' && github.event.pull_request.mergeable_state == 'clean'
-      run: terraform apply -auto-approve
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.9.5
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-2
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v3
+        with:
+          name: terraform-plan
+          path: terraform.tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve terraform.tfplan
+
+      - name: Merge Pull Request
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const pr = github.context.payload.pull_request;
+            if (pr) {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                merge_method: 'merge' // or 'squash', 'rebase'
+              });
+            }
